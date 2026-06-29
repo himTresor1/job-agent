@@ -1,0 +1,107 @@
+{
+  "_comment": "Copy to profile.json. Use Claude/ChatGPT to convert your resume into this format — see README.",
+
+  "name": "Your Name",
+  "email": "you@example.com",
+  "phone": "+1234567890",
+  "location": "City, Country",
+  "headline": "Frontend Engineer | Product Designer",
+  "summary": "2-3 sentences about who you are, what you build, and what you're looking for. Only real facts from your resume.",
+
+  "target_titles": [
+    "Frontend Engineer",
+    "Full-Stack Developer",
+    "Product Designer",
+    "UX Designer"
+  ],
+
+  "target_keywords": [
+    "react",
+    "typescript",
+    "nextjs",
+    "frontend",
+    "figma",
+    "design systems",
+    "node"
+  ],
+
+  "avoid_keywords": [
+    "unpaid",
+    "internship",
+    "senior staff",
+    "principal",
+    "engineering manager",
+    "sales",
+    "marketing",
+    "recruiter",
+    "hr",
+    "account executive"
+  ],
+
+  "skills": [
+    "TypeScript",
+    "JavaScript",
+    "React",
+    "Next.js",
+    "Node.js",
+    "Figma",
+    "Design systems",
+    "PostgreSQL"
+  ],
+
+  "experience": [
+    {
+      "company": "Acme Corp",
+      "title": "Senior Frontend Engineer",
+      "dates": "2022 - Present",
+      "location": "Remote",
+      "bullets": [
+        "Built and shipped customer-facing features used by 10,000+ users.",
+        "Led migration to a shared design system across 3 product teams.",
+        "Reduced page load time by 30% through code splitting and caching."
+      ]
+    },
+    {
+      "company": "Startup Inc",
+      "title": "Product Designer",
+      "dates": "2020 - 2022",
+      "location": "London, UK",
+      "bullets": [
+        "Designed end-to-end flows for onboarding, increasing activation by 18%.",
+        "Ran user research and usability tests with 20+ participants."
+      ]
+    }
+  ],
+
+  "education": [
+    {
+      "school": "State University",
+      "degree": "BSc Computer Science",
+      "dates": "2016 - 2020",
+      "location": "City, Country"
+    }
+  ],
+
+  "links": {
+    "portfolio": "https://yourportfolio.com",
+    "github": "https://github.com/yourusername",
+    "linkedin": "https://www.linkedin.com/in/yourprofile/"
+  },
+
+  "certifications": [
+    "Relevant certification or course — optional"
+  ],
+
+  "languages": [
+    "English (Fluent)",
+    "French (Conversational)"
+  ],
+
+  "preferences": {
+    "remote_ok": true,
+    "open_to_relocation": false,
+    "notice_period": "2 weeks",
+    "remote_preference": "Yes — seeking a fully remote role",
+    "visa_sponsorship_required": false
+  }
+}

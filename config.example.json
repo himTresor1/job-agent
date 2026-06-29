@@ -1,0 +1,66 @@
+{
+  "_comment": "Copy to config.json and fill in your values. Never commit config.json.",
+
+  "greenhouse_boards": ["stripe", "figma", "gitlab", "discord"],
+  "lever_boards": ["plaid"],
+  "enable_remoteok": true,
+  "remoteok_keywords": ["frontend", "fullstack", "react", "typescript", "engineer"],
+  "enable_wwr": true,
+  "enable_hn": false,
+
+  "min_score_for_digest": 70,
+
+  "auto_submit_enabled": true,
+  "auto_submit_score_threshold": 80,
+  "auto_submit_remote_only": true,
+  "auto_submit_unconfident": true,
+  "auto_submit_headless": true,
+  "auto_submit_max_per_run": 25,
+
+  "daily_apply_goal": 20,
+
+  "enable_linkedin": true,
+  "linkedin_discover_on_daily": true,
+  "linkedin_keywords": [
+    "Frontend Engineer",
+    "Product Designer",
+    "Full Stack Engineer"
+  ],
+  "linkedin_locations": [
+    "Remote",
+    "EMEA",
+    "Europe",
+    "United Kingdom",
+    "Germany",
+    "France",
+    "Netherlands"
+  ],
+  "linkedin_max_results": 80,
+  "linkedin_pages_per_query": 3,
+
+  "linkedin_apply_count": 20,
+  "linkedin_apply_min_score": 75,
+  "linkedin_apply_keywords": [
+    "frontend",
+    "product design",
+    "product designer",
+    "ui",
+    "ux",
+    "full stack",
+    "fullstack",
+    "engineer",
+    "developer"
+  ],
+  "linkedin_apply_emea_or_remote": true,
+
+  "linkedin_easy_apply_enabled": true,
+  "linkedin_easy_apply_min_score": 0,
+  "linkedin_easy_apply_priority_count": 10,
+
+  "openai_api_key": "",
+  "gemini_api_key": "",
+  "anthropic_api_key": "",
+
+  "linkedin_email": "",
+  "linkedin_password": ""
+}

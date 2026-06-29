@@ -1,0 +1,20 @@
+# Secrets and personal data
+config.json
+profile.json
+
+# Runtime data
+data/jobs.db
+data/browser_profile/
+output/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
