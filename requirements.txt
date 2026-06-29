@@ -1,0 +1,11 @@
+# Core (required)
+playwright>=1.40
+jinja2>=3.0
+flask>=2.0
+requests>=2.28
+beautifulsoup4>=4.11
+
+# LLM providers (optional — install only the one(s) you use)
+# OpenAI is called over HTTP via requests, so no extra package is needed for it.
+anthropic>=0.25          # for anthropic_api_key
+google-generativeai>=0.5 # for gemini_api_key

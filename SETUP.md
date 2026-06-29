@@ -26,7 +26,7 @@ cd jobagent
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
-pip install anthropic playwright flask jinja2 google-generativeai openai
+pip install -r requirements.txt
 playwright install chromium
 ```
 

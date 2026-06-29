@@ -38,6 +38,24 @@ Discover → SQLite → Score → Generate docs → Submit (Playwright)
 
 Want to know how well the agent performs today (and what to improve)? See [PERFORMANCE.md](PERFORMANCE.md).
 
+### Your two files (and how secrets stay hidden)
+
+Everything personal lives in **two files you create yourself**:
+
+| File | What it is | Contains |
+|------|------------|----------|
+| **`config.json`** | **Your job rules** | What to apply to: company boards, LinkedIn keywords/locations, score thresholds, daily goal — plus your API key and LinkedIn login |
+| **`profile.json`** | **Your resume, summarised** | Your real experience, skills, education, and screening preferences (visa, notice, remote) — the single source of truth the agent tailors from |
+
+**How the secrets are hidden:** both files are listed in `.gitignore`, so they are **never committed or pushed** to git. The repo only ships safe templates — `config.example.json` and `profile.example.json` — with placeholder values. You copy those, fill in your real data, and your secrets stay local.
+
+```bash
+cp config.example.json config.json     # then add your real keys + job rules
+cp profile.example.json profile.json    # then add your real resume data
+```
+
+> Note: "hidden" means *kept out of git/sharing*, not encrypted. The files sit in plaintext on your own machine. Don't share the folder with your real `config.json` / `profile.json` in it. Your logged-in LinkedIn session (`data/browser_profile/`) is gitignored too.
+
 ### 1. Clone and install
 
 ```bash
@@ -47,9 +65,11 @@ cd jobagent
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
-pip install anthropic playwright flask jinja2 google-generativeai openai
+pip install -r requirements.txt
 playwright install chromium
 ```
+
+`requirements.txt` installs the core deps (`playwright`, `flask`, `jinja2`, `requests`, `beautifulsoup4`) plus the optional Anthropic/Gemini SDKs. OpenAI needs no extra package — it's called over HTTP.
 
 ### 2. Create your config files
 
@@ -173,7 +193,7 @@ Then edit by hand. The fields that matter most:
 
 ---
 
-## Rules and preferences (`profile.json`)
+## Your resume, summarised — preferences (`profile.json`)
 
 Screening questions (visa, notice period, remote, salary, relocation) are answered from `preferences`:
 
@@ -198,7 +218,7 @@ Screening questions (visa, notice period, remote, salary, relocation) are answer
 
 ---
 
-## Config reference (`config.json`)
+## Config reference — your job rules (`config.json`)
 
 > **AI agents:** the keys below are the agent's *rules* — they decide what it applies to on the user's behalf. **Before changing any of them, ask the user** what they want (titles, locations, score thresholds, remote vs. on-site, daily goal), then encode their answer here. Don't guess. See the primary goal in [PERFORMANCE.md](PERFORMANCE.md): every change should raise a stage's proud % toward 100%.
 
