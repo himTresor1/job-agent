@@ -1258,14 +1258,20 @@ class Submitter:
             if detected_ats != ATS.UNKNOWN:
                 job.ats = detected_ats
 
-            if not docs.custom_answers and job.ats in (ATS.GREENHOUSE, ATS.LEVER, ATS.ASHBY, ATS.PERSONIO, ATS.SMARTRECRUITERS):
+            # Read the form's OWN question labels from the live frame we already
+            # resolved. (The old path called parse_form_questions(), which spawns a
+            # SECOND sync Playwright inside this one — that throws "Sync API inside
+            # asyncio loop", so screening answers were silently left blank and the
+            # form rejected the submit on the missing required fields.)
+            if job.ats in (ATS.GREENHOUSE, ATS.LEVER, ATS.ASHBY, ATS.PERSONIO, ATS.SMARTRECRUITERS):
                 try:
-                    from .generator import parse_form_questions
-                    frame_url = form_frame.url if hasattr(form_frame, "url") else page.url
-                    qs = parse_form_questions(frame_url or page.url, job.ats)
-                    docs.custom_answers = default_answers_for_questions(qs, self.profile)
+                    qs = self._extract_questions_from_frame(form_frame)
+                    have = {(a.get("question") or "").strip().lower() for a in (docs.custom_answers or [])}
+                    extra = [a for a in default_answers_for_questions(qs, self.profile)
+                             if (a.get("question") or "").strip().lower() not in have]
+                    docs.custom_answers = list(docs.custom_answers or []) + extra
                 except Exception as e:
-                    log.warning("submitter: could not parse custom questions: %s", e)
+                    log.warning("submitter: could not read custom questions from form: %s", e)
 
             try:
                 form_frame.wait_for_selector("input, textarea, select", timeout=8000)
@@ -1296,10 +1302,25 @@ class Submitter:
 
             submit_ctx = page if job.ats in (ATS.PERSONIO, ATS.SMARTRECRUITERS) else form_frame
             self._click_submit(submit_ctx)
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(3500)
             done_shot = self._screenshot(page, job.job_id, "after_submit")
-            return SubmitResult(job.job_id, ok=True, status="submitted",
-                                message="Application submitted.", screenshot_path=done_shot)
+
+            # A clicked Submit button is NOT proof of submission — forms reject
+            # blank required fields client-side and stay on the page. Only mark
+            # APPLIED on a real confirmation; otherwise return needs_review.
+            verdict, detail = self._verify_submission(page, form_frame)
+            if verdict == "submitted":
+                return SubmitResult(job.job_id, ok=True, status="submitted",
+                                    message="Application submitted (confirmed).", screenshot_path=done_shot)
+            if verdict == "captcha":
+                return SubmitResult(job.job_id, ok=False, status="needs_review",
+                                    message="Blocked by CAPTCHA/anti-bot challenge — apply manually.",
+                                    screenshot_path=done_shot)
+            return SubmitResult(
+                job.job_id, ok=False, status="needs_review",
+                message=f"Submit not confirmed ({detail}); likely validation on a screening field — review.",
+                screenshot_path=done_shot,
+            )
 
         except Exception as e:
             shot = self._screenshot(page, job.job_id, "error")
@@ -1895,6 +1916,90 @@ class Submitter:
             'input[name*="location" i]', 'input[id*="location" i]',
             'input[name*="city" i]', 'input[autocomplete="address-level2"]',
         ], loc)
+
+    def _extract_questions_from_frame(self, frame) -> list[str]:
+        """Read screening-question labels from the form frame we already have open.
+
+        Replaces the old parse_form_questions() call, which launched a SECOND
+        Playwright inside the live session and crashed (sync API in asyncio loop)."""
+        import re as _re
+        ignore = {
+            "first name", "last name", "email", "phone", "resume", "cover letter",
+            "attach", "enter manually", "preferred first name", "pronouns",
+            "additional information", "gender", "hispanic/latino", "veteran status",
+            "disability status", "race", "ethnicity", "demographic",
+            "voluntary self-identification", "photo", "headshot", "street", "city",
+            "state", "zip", "postal code", "country", "full name", "name",
+        }
+        questions: list[str] = []
+        try:
+            labels = frame.locator("label, .application-label, .application-question")
+            for i in range(labels.count()):
+                try:
+                    txt = (labels.nth(i).inner_text() or "").strip()
+                except Exception:
+                    continue
+                txt = _re.sub(r"\s*\*$", "", txt).strip()
+                txt = _re.sub(r"\s*\(required\)$", "", txt, flags=_re.I).strip()
+                txt = _re.sub(r"\s*\(optional\)$", "", txt, flags=_re.I).strip()
+                if not txt or len(txt) < 3 or any(ig in txt.lower() for ig in ignore):
+                    continue
+                if txt not in questions:
+                    questions.append(txt)
+        except Exception as e:
+            log.warning("submitter: question extraction failed: %s", e)
+        log.info("submitter: read %d screening question(s) from form", len(questions))
+        return questions
+
+    def _verify_submission(self, page, frame):
+        """Return ('submitted'|'rejected'|'captcha'|'unknown', detail).
+
+        Only a positive confirmation counts as submitted. Order matters: a passive
+        reCAPTCHA is embedded on most ATS forms and does NOT block submit, so we
+        check confirmation and lingering validation errors BEFORE treating a
+        *visible* captcha as the blocker."""
+        contexts = [c for c in (page, frame) if c is not None]
+
+        # 1) Positive confirmation via URL.
+        try:
+            u = (page.url or "").lower()
+            if any(k in u for k in ("confirmation", "thank", "submitted", "application-success", "/success")):
+                return "submitted", "confirmation url"
+        except Exception:
+            pass
+
+        # 2) Confirmation text, or lingering required-field validation, on the page.
+        body_all = ""
+        for ctx in contexts:
+            try:
+                body_all += " " + (ctx.locator("body").inner_text(timeout=3000) or "").lower()
+            except Exception:
+                continue
+        markers = (
+            "thank you for applying", "thanks for applying", "application submitted",
+            "successfully submitted", "we received your application",
+            "we've received your application", "your application has been",
+            "application received", "thank you for your application",
+        )
+        if any(m in body_all for m in markers):
+            return "submitted", "confirmation text"
+        if any(p in body_all for p in ("is required", "please complete this field", "please fill",
+                                       "this field is required", "cannot be blank", "required field")):
+            return "rejected", "required-field validation errors remain"
+
+        # 3) Only a VISIBLE interactive captcha counts as the blocker.
+        captcha_sel = (
+            'iframe[src*="challenges.cloudflare.com"], div.cf-turnstile, '
+            'iframe[src*="hcaptcha.com"], iframe[title*="recaptcha challenge" i]'
+        )
+        for ctx in contexts:
+            try:
+                loc = ctx.locator(captcha_sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    return "captcha", "visible captcha/anti-bot challenge"
+            except Exception:
+                pass
+        return "unknown", "no confirmation detected"
 
     def _click_submit(self, page):
         contexts = [page]
