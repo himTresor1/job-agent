@@ -11,6 +11,7 @@ Flags: --config, --profile, --db, --min-score
 
 from __future__ import annotations
 
+import utils.session
 import argparse
 import json
 import logging
