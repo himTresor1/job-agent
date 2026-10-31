@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
+from .email_code import fetch_verification_code
+from .field_resolver import extract_and_open_fields, resolve_answers, validate_answers
 from .generator import GeneratedDocs
 from .models import ATS, Job
 from .profile import Profile
@@ -393,6 +395,12 @@ def detect_ats_from_url(url: str) -> ATS:
         return ATS.PERSONIO
     if "smartrecruiters.com" in u:
         return ATS.SMARTRECRUITERS
+    if "workable.com" in u:
+        return ATS.WORKABLE
+    if "teamtailor.com" in u:
+        return ATS.TEAMTAILOR
+    if "recruitee.com" in u:
+        return ATS.RECRUITEE
     if "hibob.com" in u or "careers.hibob" in u:
         return ATS.OTHER
     if "workday" in u:
@@ -408,6 +416,10 @@ def answer_for_label(label: str, profile: Profile) -> str:
     notice = prefs.get("notice_period", "7 days")
     remote_pref = prefs.get("remote_preference", "Yes — seeking a fully remote role")
     ql = label.lower().strip()
+    if (("worked" in ql or "employed" in ql) and ("before" in ql or "previously" in ql or "ever" in ql)):
+        # "Have you ever worked for X?" — Yes only if X is actually a profile employer.
+        companies = [(e.get("company") or "").lower() for e in (getattr(profile, "experience", None) or [])]
+        return "Yes" if any(c and c in ql for c in companies) else "No"
     if any(k in ql for k in ("authorized", "legally authorized", "work authorization", "right to work", "eligible to work", "legally eligible")):
         return "Yes"
     if "german" in ql and ("visa" in ql or "requirement" in ql):
@@ -439,7 +451,14 @@ def answer_for_label(label: str, profile: Profile) -> str:
         return "I am not in Hamburg but ready to relocate"
     if "location" in ql and "relocation" not in ql:
         return profile.location
+    if ("where" in ql and "work" in ql and "intend" in ql) or "where do you intend" in ql:
+        return profile.location
     links = profile.links or {}
+    if "password" in ql:
+        if any(k in ql for k in ("portfolio", "website")):
+            p_link = links.get("portfolio", "")
+            return f"{p_link} — no password required" if p_link else ""
+        return ""  # standalone password fields — never guess
     if "linkedin" in ql:
         return links.get("linkedin", "")
     if "github" in ql:
@@ -542,6 +561,7 @@ class Submitter:
                     "boards.greenhouse.io", "job-boards.greenhouse.io",
                     "lever.co", "ashbyhq.com", "hibob.com",
                     "personio.com", "smartrecruiters.com/oneclick-ui",
+                    "workable.com", "teamtailor.com", "recruitee.com",
                 )):
                     log.info("submitter: form frame via url %s", frame.url[:80])
                     ats = detect_ats_from_url(frame.url)
@@ -963,6 +983,31 @@ class Submitter:
                     continue
         return False
 
+    def _easy_apply_blockers(self, page) -> str:
+        """Collect visible validation errors + their question labels from the modal."""
+        msgs: list[str] = []
+        for sel in (".artdeco-inline-feedback__message", '[role="alert"]',
+                    ".fb-dash-form-element__error-text"):
+            try:
+                for el in page.locator(sel).all():
+                    t = (el.inner_text() or "").strip()
+                    if t and len(t) < 200 and t not in msgs:
+                        # Attach the question this error sits under, if findable
+                        try:
+                            q = el.locator(
+                                "xpath=(ancestor::*[.//label or .//legend][1]//label"
+                                " | ancestor::*[.//label or .//legend][1]//legend)[1]"
+                            ).first
+                            qt = (q.inner_text() or "").strip() if q.count() > 0 else ""
+                            if qt and qt.lower() not in t.lower():
+                                t = f"{qt}: {t}"
+                        except Exception:
+                            pass
+                        msgs.append(t)
+            except Exception:
+                continue
+        return "; ".join(msgs[:3])
+
     def _submit_linkedin_easy_apply(self, job: Job, docs: GeneratedDocs) -> SubmitResult:
         """Submit via LinkedIn Easy Apply (in-app SDUI flow)."""
         from .linkedin_apply import easy_apply_url
@@ -1007,8 +1052,28 @@ class Submitter:
                         submit_btn.click(timeout=8000)
                         page.wait_for_timeout(4000)
                         done = self._screenshot(page, job.job_id, "after_submit")
-                        return SubmitResult(job.job_id, ok=True, status="submitted",
-                                            message="LinkedIn Easy Apply submitted.", screenshot_path=done)
+                        # A clicked Submit is not proof — LinkedIn keeps the modal
+                        # open on validation errors. Only confirm on the real
+                        # "application was sent" state.
+                        if self._linkedin_already_applied(page):
+                            return SubmitResult(job.job_id, ok=True, status="submitted",
+                                                message="LinkedIn Easy Apply submitted (confirmed).",
+                                                screenshot_path=done)
+                        blockers = self._easy_apply_blockers(page)
+                        if blockers:
+                            return SubmitResult(
+                                job.job_id, ok=False, status="needs_review",
+                                message=f"Easy Apply blocked at: {blockers}",
+                                screenshot_path=done)
+                        page.wait_for_timeout(3000)
+                        if self._linkedin_already_applied(page):
+                            return SubmitResult(job.job_id, ok=True, status="submitted",
+                                                message="LinkedIn Easy Apply submitted (confirmed).",
+                                                screenshot_path=done)
+                        return SubmitResult(
+                            job.job_id, ok=False, status="needs_review",
+                            message="Easy Apply Submit clicked but no confirmation appeared — verify manually.",
+                            screenshot_path=done)
 
                 clicked = False
                 for btn_text in ("Review", "Next"):
@@ -1034,9 +1099,12 @@ class Submitter:
                     break
 
             shot = self._screenshot(page, job.job_id, "easy_apply_incomplete")
+            blockers = self._easy_apply_blockers(page)
+            msg = (f"Easy Apply stuck at required question(s): {blockers}"
+                   if blockers else
+                   "LinkedIn Easy Apply did not reach Submit — complete manually.")
             return SubmitResult(job.job_id, ok=False, status="needs_review",
-                                message="LinkedIn Easy Apply did not reach Submit — complete manually.",
-                                screenshot_path=shot)
+                                message=msg, screenshot_path=shot)
         except Exception as e:
             shot = self._screenshot(page, job.job_id, "error")
             return SubmitResult(job.job_id, ok=False, status="error",
@@ -1219,10 +1287,12 @@ class Submitter:
                     )
 
             # Company career landing pages may need a second Apply click
-            if job.ats in (ATS.GREENHOUSE, ATS.LEVER, ATS.ASHBY, ATS.PERSONIO, ATS.SMARTRECRUITERS, ATS.UNKNOWN):
+            if job.ats in (ATS.GREENHOUSE, ATS.LEVER, ATS.ASHBY, ATS.PERSONIO, ATS.SMARTRECRUITERS,
+                           ATS.WORKABLE, ATS.TEAMTAILOR, ATS.RECRUITEE, ATS.UNKNOWN):
                 on_apply_form = (
                     (job.ats == ATS.PERSONIO and "apply" in page.url.lower())
                     or (job.ats == ATS.SMARTRECRUITERS and "oneclick-ui" in " ".join(f.url for f in page.frames))
+                    or (job.ats == ATS.WORKABLE and "/apply" in page.url.lower())
                 )
                 if not on_apply_form:
                     self._click_apply_on_careers_page(page)
@@ -1252,26 +1322,14 @@ class Submitter:
                     self._prepare_personio_form(page, job)
                 if job.ats == ATS.SMARTRECRUITERS:
                     self._prepare_smartrecruiters_form(page, job)
+                if job.ats == ATS.WORKABLE:
+                    self._prepare_workable_form(page)
+                if job.ats in (ATS.TEAMTAILOR, ATS.RECRUITEE):
+                    self._prepare_teamtailor_recruitee_form(page)
 
-            # Augment custom answers if form wasn't parsed at generation time
             form_frame, detected_ats = self._resolve_form_frame(page, job)
             if detected_ats != ATS.UNKNOWN:
                 job.ats = detected_ats
-
-            # Read the form's OWN question labels from the live frame we already
-            # resolved. (The old path called parse_form_questions(), which spawns a
-            # SECOND sync Playwright inside this one — that throws "Sync API inside
-            # asyncio loop", so screening answers were silently left blank and the
-            # form rejected the submit on the missing required fields.)
-            if job.ats in (ATS.GREENHOUSE, ATS.LEVER, ATS.ASHBY, ATS.PERSONIO, ATS.SMARTRECRUITERS):
-                try:
-                    qs = self._extract_questions_from_frame(form_frame)
-                    have = {(a.get("question") or "").strip().lower() for a in (docs.custom_answers or [])}
-                    extra = [a for a in default_answers_for_questions(qs, self.profile)
-                             if (a.get("question") or "").strip().lower() not in have]
-                    docs.custom_answers = list(docs.custom_answers or []) + extra
-                except Exception as e:
-                    log.warning("submitter: could not read custom questions from form: %s", e)
 
             try:
                 form_frame.wait_for_selector("input, textarea, select", timeout=8000)
@@ -1284,9 +1342,20 @@ class Submitter:
                 ATS.ASHBY: self._fill_ashby,
                 ATS.PERSONIO: self._fill_personio,
                 ATS.SMARTRECRUITERS: self._fill_smartrecruiters,
+                ATS.WORKABLE: self._fill_workable,
+                ATS.TEAMTAILOR: self._fill_teamtailor,
+                ATS.RECRUITEE: self._fill_recruitee,
             }.get(job.ats, self._fill_generic)
 
             critical, warnings = filler(form_frame, job, docs)
+
+            if job.ats in (ATS.GREENHOUSE, ATS.LEVER, ATS.ASHBY, ATS.PERSONIO, ATS.SMARTRECRUITERS,
+                           ATS.WORKABLE, ATS.TEAMTAILOR, ATS.RECRUITEE):
+                # Unresolved screening fields are a warning, not a hard block —
+                # whether a "required" marker actually blocks the server-side
+                # submit is unreliable to guess; _verify_submission() below reads
+                # the form's own post-submit validation errors, which is ground truth.
+                warnings += self._resolve_and_fill_remaining(form_frame, job, docs)
 
             shot = self._screenshot(page, job.job_id, "before_submit")
 
@@ -1301,6 +1370,7 @@ class Submitter:
                             len(warnings), warnings[:5])
 
             submit_ctx = page if job.ats in (ATS.PERSONIO, ATS.SMARTRECRUITERS) else form_frame
+            submit_ts = time.time()
             self._click_submit(submit_ctx)
             page.wait_for_timeout(3500)
             done_shot = self._screenshot(page, job.job_id, "after_submit")
@@ -1316,6 +1386,10 @@ class Submitter:
                 return SubmitResult(job.job_id, ok=False, status="needs_review",
                                     message="Blocked by CAPTCHA/anti-bot challenge — apply manually.",
                                     screenshot_path=done_shot)
+            if verdict == "email_code":
+                return self._resolve_email_code_and_resubmit(
+                    page, form_frame, submit_ctx, job, submit_ts, done_shot,
+                )
             return SubmitResult(
                 job.job_id, ok=False, status="needs_review",
                 message=f"Submit not confirmed ({detail}); likely validation on a screening field — review.",
@@ -1458,6 +1532,14 @@ class Submitter:
                     critical.append(key)
                 else:
                     warnings.append(key)
+        # Name coverage is satisfied by EITHER full_name OR first+last; forms
+        # have one variant, so don't block on the one this form doesn't have.
+        if ("full_name" in critical
+                and {"first_name", "last_name"} & set(fields)
+                and "first_name" not in critical and "last_name" not in critical):
+            critical.remove("full_name")
+        if "full_name" in fields and "full_name" not in critical:
+            critical = [c for c in critical if c not in ("first_name", "last_name")]
         return critical, warnings
 
     @staticmethod
@@ -1700,6 +1782,11 @@ class Submitter:
                                                 log.warning("Failed to check option %s: %s", opt_lbl_text, opt_err)
                                     if filled:
                                         break
+                                elif (elem.get_attribute("role") == "combobox"
+                                      or (elem.get_attribute("aria-autocomplete") or "") == "list"):
+                                    if self._fill_react_combobox(page, elem, [a_text]):
+                                        filled = True
+                                        break
                                 elif type_attr.lower() != "file":
                                     try:
                                         elem.fill(a_text, timeout=3000)
@@ -1742,6 +1829,50 @@ class Submitter:
         for frame in page.frames:
             if "oneclick-ui" in frame.url:
                 return
+
+    def _prepare_workable_form(self, page) -> None:
+        """Workable postings live at /j/{code}; the form is at /j/{code}/apply."""
+        url = page.url
+        if "workable.com" in url.lower() and "/apply" not in url.lower():
+            for sel in ('a:has-text("Apply now")', 'button:has-text("Apply now")',
+                        'a[data-ui="apply-button"]', 'button[data-ui="apply-button"]'):
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() > 0 and self._is_visible(loc):
+                        loc.click(timeout=5000)
+                        page.wait_for_timeout(3000)
+                        return
+                except Exception:
+                    continue
+            m = re.search(r"(https://apply\.workable\.com/[^/]+/j/[A-Za-z0-9]+)", url)
+            if m:
+                page.goto(m.group(1) + "/apply/", wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(2500)
+
+    def _prepare_teamtailor_recruitee_form(self, page) -> None:
+        """Teamtailor/Recruitee postings show the form after an Apply click (or #apply anchor)."""
+        if page.locator('input[type="email"], input[name*="email" i]').count() > 0:
+            return
+        for sel in (
+            'a:has-text("Apply for this job")', 'button:has-text("Apply for this job")',
+            'a[href*="#apply"]', 'a:has-text("Apply now")', 'button:has-text("Apply now")',
+            'a:has-text("Apply")', 'button:has-text("Apply")',
+        ):
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and self._is_visible(loc):
+                    loc.click(timeout=5000)
+                    page.wait_for_timeout(3000)
+                    return
+            except Exception:
+                continue
+        if "recruitee.com" in page.url.lower() and "/c/" not in page.url:
+            try:
+                page.goto(page.url.split("#")[0].rstrip("/") + "/c/new",
+                          wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(2500)
+            except Exception:
+                pass
 
     def _fill_personio(self, page, job, docs) -> tuple[list[str], list[str]]:
         p = self.profile
@@ -1818,15 +1949,111 @@ class Submitter:
         if not self._upload_resume(ctx, docs):
             warn.append("resume_upload")
         self._fill_social_links(ctx)
-        if not docs.custom_answers:
-            questions = []
-            for lbl in ctx.locator("label, legend").all():
-                t = (lbl.inner_text() or "").strip()
-                if t and len(t) > 3:
-                    questions.append(t)
-            docs.custom_answers = default_answers_for_questions(questions, self.profile)
-        unfilled = self._fill_custom_questions(ctx, docs)
-        return crit, warn + unfilled
+        return crit, warn
+
+    def _fill_react_combobox(self, frame, input_el, candidates: list[str]) -> bool:
+        """Drive a React-select style combobox: click, type a stem, pick the option.
+
+        Plain select_option can't operate these widgets (the real <select> doesn't
+        exist); required ones left empty are why Greenhouse rejected the submits.
+        The inner input is often invisible until its control is clicked, so click
+        the visible ancestor control and type via the page keyboard."""
+        kb = frame.keyboard if hasattr(frame, "keyboard") else frame.page.keyboard
+        clicker = input_el
+        try:
+            ctrl = input_el.locator(
+                "xpath=ancestor::*[contains(@class,'control') or contains(@class,'select')][1]"
+            )
+            if ctrl.count() > 0 and self._is_visible(ctrl):
+                clicker = ctrl.first
+        except Exception:
+            pass
+        for cand in candidates:
+            cand = (cand or "").strip()
+            if not cand:
+                continue
+            try:
+                clicker.click(timeout=3000)
+                frame.wait_for_timeout(300)
+                kb.press("ControlOrMeta+a")
+                kb.type(cand[:60], delay=25)
+                # Scope option-picking to THIS combobox's own menu — a bare
+                # [role="option"] query matches every other dropdown's list on
+                # the page (e.g. the phone country-code widget keeps all ~240
+                # countries in the DOM), so the sweep was clicking options in
+                # the wrong list and reporting success.
+                menu = None
+                oid = (input_el.get_attribute("aria-controls")
+                       or input_el.get_attribute("aria-owns"))
+                if oid:
+                    m = frame.locator(f'[id="{oid}"]')
+                    if m.count() > 0:
+                        menu = m.first
+                scope = menu if menu is not None else frame
+                # Async menus (location autocomplete) need a moment to populate.
+                opts = scope.locator('[role="option"], .select__option')
+                visible = []
+                for _ in range(6):
+                    frame.wait_for_timeout(450)
+                    visible = [opts.nth(j) for j in range(min(opts.count(), 60))
+                               if self._is_visible(opts.nth(j))]
+                    if visible:
+                        break
+                pick = None
+                cl = cand.lower()
+                for o in visible:
+                    t = (o.inner_text() or "").strip()
+                    if not t:
+                        continue
+                    tl = t.lower()
+                    if tl == cl:
+                        pick = o
+                        break
+                    if pick is None and (cl in tl or tl in cl):
+                        pick = o
+                if pick is None and visible and menu is not None:
+                    # Filtered menu with no text match: trust the first filtered
+                    # option only when the widget actually filtered (1-2 left).
+                    if len(visible) <= 2:
+                        pick = visible[0]
+                if pick is not None:
+                    pick.click(timeout=3000)
+                    frame.wait_for_timeout(300)
+                    if self._combo_value_committed(input_el):
+                        return True
+                    continue
+                kb.press("Escape")
+            except Exception:
+                continue
+        return False
+
+    def _combo_value_committed(self, input_el) -> bool:
+        """True when the combobox now shows a chosen value (react-select single-value).
+
+        Must scope to THIS field's own value-container, not a generic Nth-level
+        ancestor — on dense forms (many fields sharing wrapper divs a few levels
+        up), a broad ancestor search finds a DIFFERENT, already-filled sibling
+        field's single-value span and reports false success. This is why
+        Duolingo's screening dropdowns were logged as filled while the live
+        page still showed every one of them empty with a required-field error."""
+        try:
+            value_container = input_el.locator(
+                "xpath=ancestor::*[contains(@class,'value-container') or contains(@class,'valueContainer')][1]"
+            )
+            if value_container.count() > 0:
+                sv = value_container.locator('[class*="single-value"], [class*="singleValue"]')
+                return sv.count() > 0 and bool((sv.first.inner_text() or "").strip())
+            # No react-select value-container found — likely a plain widget.
+            container = input_el.locator(
+                "xpath=ancestor::*[contains(@class,'select') or contains(@class,'control')][1]"
+            )
+            if container.count() > 0:
+                sv = container.locator('[class*="single-value"], [class*="singleValue"]')
+                if sv.count() > 0 and (sv.first.inner_text() or "").strip():
+                    return True
+            return bool((input_el.input_value(timeout=1000) or "").strip())
+        except Exception:
+            return False
 
     def _fill_greenhouse(self, page, job, docs) -> tuple[list[str], list[str]]:
         crit, warn = self._fill_common(page, {
@@ -1840,8 +2067,7 @@ class Submitter:
         self._upload_cover_letter(page, docs)
         self._fill_social_links(page)
         self._fill_location_field(page)
-        unfilled = self._fill_custom_questions(page, docs)
-        return crit, warn + unfilled
+        return crit, warn
 
     def _fill_lever(self, page, job, docs) -> tuple[list[str], list[str]]:
         crit, warn = self._fill_common(page, {
@@ -1853,8 +2079,7 @@ class Submitter:
             warn.append("resume_upload")
         self._upload_cover_letter(page, docs)
         self._fill_social_links(page)
-        unfilled = self._fill_custom_questions(page, docs)
-        return crit, warn + unfilled
+        return crit, warn
 
     def _fill_ashby(self, page, job, docs) -> tuple[list[str], list[str]]:
         crit, warn = self._fill_common(page, {
@@ -1865,8 +2090,54 @@ class Submitter:
         if not self._upload_resume(page, docs):
             warn.append("resume_upload")
         self._fill_social_links(page)
-        unfilled = self._fill_custom_questions(page, docs)
-        return crit, warn + unfilled
+        return crit, warn
+
+    def _fill_workable(self, page, job, docs) -> tuple[list[str], list[str]]:
+        crit, warn = self._fill_common(page, {
+            "first_name": ['input[name="firstname"]', 'input[data-ui="firstname"]',
+                           'input[id*="firstname" i]', 'input[name*="first" i]',
+                           'input[autocomplete="given-name"]'],
+            "last_name": ['input[name="lastname"]', 'input[data-ui="lastname"]',
+                          'input[id*="lastname" i]', 'input[name*="last" i]',
+                          'input[autocomplete="family-name"]'],
+            "email": ['input[name="email"]', 'input[type="email"]'],
+            "phone": ['input[name="phone"]', 'input[type="tel"]'],
+        })
+        if not self._upload_resume(page, docs):
+            warn.append("resume_upload")
+        self._upload_cover_letter(page, docs)
+        self._fill_social_links(page)
+        return crit, warn
+
+    def _fill_teamtailor(self, page, job, docs) -> tuple[list[str], list[str]]:
+        crit, warn = self._fill_common(page, {
+            "first_name": ['input[name="candidate[first_name]"]', '#candidate_first_name',
+                           'input[name*="first" i]', 'input[autocomplete="given-name"]'],
+            "last_name": ['input[name="candidate[last_name]"]', '#candidate_last_name',
+                          'input[name*="last" i]', 'input[autocomplete="family-name"]'],
+            "email": ['input[name="candidate[email]"]', '#candidate_email', 'input[type="email"]'],
+            "phone": ['input[name="candidate[phone]"]', '#candidate_phone', 'input[type="tel"]'],
+        })
+        if not self._upload_resume(page, docs):
+            warn.append("resume_upload")
+        self._upload_cover_letter(page, docs)
+        self._fill_social_links(page)
+        return crit, warn
+
+    def _fill_recruitee(self, page, job, docs) -> tuple[list[str], list[str]]:
+        crit, warn = self._fill_common(page, {
+            "full_name": ['input[name="candidate[name]"]', '#candidate_name',
+                          'input[autocomplete="name"]', 'input[placeholder*="full name" i]'],
+            "first_name": ['input[name*="first" i]', 'input[autocomplete="given-name"]'],
+            "last_name": ['input[name*="last" i]', 'input[autocomplete="family-name"]'],
+            "email": ['input[name="candidate[email]"]', '#candidate_email', 'input[type="email"]'],
+            "phone": ['input[name="candidate[phone]"]', '#candidate_phone', 'input[type="tel"]'],
+        })
+        if not self._upload_resume(page, docs):
+            warn.append("resume_upload")
+        self._upload_cover_letter(page, docs)
+        self._fill_social_links(page)
+        return crit, warn
 
     def _fill_generic(self, page, job, docs) -> tuple[list[str], list[str]]:
         crit, warn = self._fill_common(page, {
@@ -1905,8 +2176,7 @@ class Submitter:
         self._upload_cover_letter(page, docs)
         self._fill_social_links(page)
         self._fill_location_field(page)
-        unfilled = self._fill_custom_questions(page, docs)
-        return crit, warn + unfilled
+        return crit, warn
 
     def _fill_location_field(self, page):
         loc = self.profile.location
@@ -1917,39 +2187,126 @@ class Submitter:
             'input[name*="city" i]', 'input[autocomplete="address-level2"]',
         ], loc)
 
-    def _extract_questions_from_frame(self, frame) -> list[str]:
-        """Read screening-question labels from the form frame we already have open.
+    def _resolve_and_fill_remaining(self, frame, job: Job, docs: GeneratedDocs) -> list[str]:
+        """Answer every screening field the per-ATS filler didn't already own.
 
-        Replaces the old parse_form_questions() call, which launched a SECOND
-        Playwright inside the live session and crashed (sync API in asyncio loop)."""
-        import re as _re
-        ignore = {
-            "first name", "last name", "email", "phone", "resume", "cover letter",
-            "attach", "enter manually", "preferred first name", "pronouns",
-            "additional information", "gender", "hispanic/latino", "veteran status",
-            "disability status", "race", "ethnicity", "demographic",
-            "voluntary self-identification", "photo", "headshot", "street", "city",
-            "state", "zip", "postal code", "country", "full name", "name",
-        }
-        questions: list[str] = []
+        Extracts each remaining field's real label/type/options, gets one AI
+        answer map grounded in the profile, and applies it with the same
+        mechanical primitives used everywhere else. Falls back to the keyword
+        heuristic (answer_for_label) if the AI call fails outright (e.g. the
+        429s seen from OpenAI) so a rate limit doesn't leave the form blank."""
         try:
-            labels = frame.locator("label, .application-label, .application-question")
-            for i in range(labels.count()):
-                try:
-                    txt = (labels.nth(i).inner_text() or "").strip()
-                except Exception:
-                    continue
-                txt = _re.sub(r"\s*\*$", "", txt).strip()
-                txt = _re.sub(r"\s*\(required\)$", "", txt, flags=_re.I).strip()
-                txt = _re.sub(r"\s*\(optional\)$", "", txt, flags=_re.I).strip()
-                if not txt or len(txt) < 3 or any(ig in txt.lower() for ig in ignore):
-                    continue
-                if txt not in questions:
-                    questions.append(txt)
+            fields, locators = extract_and_open_fields(frame)
         except Exception as e:
-            log.warning("submitter: question extraction failed: %s", e)
-        log.info("submitter: read %d screening question(s) from form", len(questions))
-        return questions
+            log.warning("submitter: field extraction failed: %s", e)
+            return []
+        if not fields:
+            return []
+
+        log.info("submitter: resolving %d field(s) for %s", len(fields), job.ats.value)
+        try:
+            answers = resolve_answers(fields, self.profile, job)
+        except Exception as e:
+            log.warning("submitter: field resolver call failed: %s", e)
+            answers = {}
+
+        if not answers:
+            heuristic = {}
+            loc = self.profile.location or ""
+            for f in fields:
+                if f["kind"] == "autocomplete":
+                    # answer_for_label has no notion of a free-text location
+                    # search box; without this, Country/Location — almost
+                    # always required — are silently left blank when AI is down.
+                    ll = f["label"].lower()
+                    heuristic[f["id"]] = (loc.split(",")[-1].strip() if "countr" in ll
+                                          else loc.split(",")[0].strip())
+                else:
+                    ans = answer_for_label(f["label"], self.profile)
+                    if ans:
+                        heuristic[f["id"]] = ans
+            heuristic = {k: v for k, v in heuristic.items() if v}
+            answers = validate_answers(fields, heuristic)
+            if answers:
+                log.info("submitter: AI resolver unavailable — used keyword fallback for %d field(s)",
+                          len(answers))
+
+        filled_ids = self._apply_resolved_answers(frame, locators, answers)
+        unfilled = [f["label"] for f in fields if f["id"] not in filled_ids]
+        if unfilled:
+            log.warning("submitter: %d field(s) left unanswered: %s", len(unfilled), unfilled[:5])
+        return unfilled
+
+    def _apply_resolved_answers(self, frame, locators: dict, answers: dict) -> set:
+        filled: set = set()
+        for fid, ans in answers.items():
+            loc = locators.get(fid)
+            if not loc or not ans:
+                continue
+            try:
+                kind = loc["kind"]
+                if kind == "select":
+                    if _select_option_fuzzy(loc["input"], ans):
+                        filled.add(fid)
+                elif kind in ("combobox", "autocomplete"):
+                    if self._fill_react_combobox(frame, loc["input"], [ans]):
+                        filled.add(fid)
+                elif kind == "radio":
+                    if self._pick_radio_option(loc["container"], ans):
+                        filled.add(fid)
+                elif kind == "listbox_group":
+                    if self._fill_listbox_group(frame, loc["group"], ans):
+                        filled.add(fid)
+                elif kind == "checkbox":
+                    if ans == "check":
+                        loc["input"].check(force=True, timeout=3000)
+                    filled.add(fid)  # a deliberate leave-unchecked is still a resolved answer
+                elif kind in ("text", "textarea"):
+                    loc["input"].fill(ans, timeout=3000)
+                    filled.add(fid)
+            except Exception as e:
+                log.warning("submitter: could not apply answer for %s: %s", fid, e)
+        return filled
+
+    def _fill_listbox_group(self, frame, group_el, answer: str) -> bool:
+        """Fill Greenhouse's newer-UI listbox widget: click the group's own
+        button, click the matching option in the popped-open listbox, confirm
+        the group's own displayed text changed (checked on the group itself,
+        not a generic ancestor — the sibling-leakage bug already burned once
+        this session doesn't get a second chance here)."""
+        try:
+            before = (group_el.inner_text() or "").strip()
+            btn = group_el.locator('button[aria-haspopup="listbox"]').first
+            if btn.count() == 0:
+                return False
+            btn.click(timeout=3000)
+            frame.wait_for_timeout(500)
+            list_id = btn.get_attribute("aria-controls") or ""
+            menu = frame.locator(f'[id="{list_id}"]') if list_id else frame.locator('[role="listbox"]').first
+            opts = menu.locator('[role="option"]') if menu.count() > 0 else frame.locator('[role="option"]')
+            pick = None
+            al = answer.lower().strip()
+            for j in range(min(opts.count(), 60)):
+                o = opts.nth(j)
+                t = (o.inner_text() or "").strip()
+                if not t:
+                    continue
+                tl = t.lower()
+                if tl == al:
+                    pick = o
+                    break
+                if pick is None and (al in tl or tl in al):
+                    pick = o
+            if pick is None:
+                frame.keyboard.press("Escape") if hasattr(frame, "keyboard") else frame.page.keyboard.press("Escape")
+                return False
+            pick.click(timeout=3000)
+            frame.wait_for_timeout(300)
+            after = (group_el.inner_text() or "").strip()
+            return after != before and bool(after)
+        except Exception as e:
+            log.warning("submitter: listbox-group fill failed: %s", e)
+            return False
 
     def _verify_submission(self, page, frame):
         """Return ('submitted'|'rejected'|'captcha'|'unknown', detail).
@@ -1983,8 +2340,20 @@ class Submitter:
         )
         if any(m in body_all for m in markers):
             return "submitted", "confirmation text"
-        if any(p in body_all for p in ("is required", "please complete this field", "please fill",
-                                       "this field is required", "cannot be blank", "required field")):
+        # Greenhouse can gate submission on an emailed one-time code ("Security
+        # code" / "verification code was sent to ..."). This isn't a field-fill
+        # problem — no amount of correct answers gets past it — so it needs its
+        # own verdict rather than being lumped into generic validation failure.
+        if any(p in body_all for p in ("verification code was sent", "security code",
+                                       "enter the 8-character code", "check your email for a code")):
+            return "email_code", "blocked by an emailed verification code"
+        # NOTE: deliberately NOT matching the bare phrase "required field" — Greenhouse
+        # renders "* indicates a required field" as permanent static legend text on
+        # every form regardless of validity, so that substring alone false-positives
+        # on every single submission. Each phrase below is live-validation-specific.
+        if any(p in body_all for p in ("this field is required", "field is required",
+                                       "please complete this field", "please fill in",
+                                       "cannot be blank", "you must complete", "must be completed")):
             return "rejected", "required-field validation errors remain"
 
         # 3) Only a VISIBLE interactive captcha counts as the blocker.
@@ -2000,6 +2369,64 @@ class Submitter:
             except Exception:
                 pass
         return "unknown", "no confirmation detected"
+
+    def _fill_verification_code(self, frame, code: str) -> bool:
+        """Fill Greenhouse's emailed security code — either one input for the
+        whole code, or a per-character box group (common OTP-input pattern)."""
+        try:
+            boxes = frame.locator('input[maxlength="1"]')
+            n = boxes.count()
+            if 0 < n <= 12:
+                visible = [boxes.nth(i) for i in range(n) if self._is_visible(boxes.nth(i))]
+                if len(visible) == len(code):
+                    for ch, box in zip(code, visible):
+                        box.fill(ch, timeout=2000)
+                    return True
+        except Exception:
+            pass
+        for sel in ('input[name*="security" i]', 'input[id*="security" i]',
+                    'input[placeholder*="code" i]', 'input[aria-label*="code" i]'):
+            try:
+                loc = frame.locator(sel).first
+                if loc.count() > 0 and self._is_visible(loc):
+                    loc.fill(code, timeout=3000)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _resolve_email_code_and_resubmit(self, page, form_frame, submit_ctx, job: Job,
+                                          submit_ts: float, done_shot: str) -> SubmitResult:
+        """Greenhouse asked for an emailed one-time code — no field answer gets past
+        this, so poll Gmail for it, enter it, and resubmit."""
+        code = fetch_verification_code(job.company, submit_ts)
+        if not code:
+            return SubmitResult(
+                job.job_id, ok=False, status="needs_review",
+                message="Blocked by an emailed verification code — none arrived within the "
+                        "wait window (check GMAIL_ADDRESS/GMAIL_APP_PASSWORD are set, or check "
+                        "spam) — finish manually.",
+                screenshot_path=done_shot)
+
+        if not self._fill_verification_code(form_frame, code):
+            return SubmitResult(
+                job.job_id, ok=False, status="needs_review",
+                message=f"Got the emailed code but couldn't find the code field on the form "
+                        f"to enter it — finish manually with code {code}.",
+                screenshot_path=done_shot)
+
+        self._click_submit(submit_ctx)
+        page.wait_for_timeout(3500)
+        retry_shot = self._screenshot(page, job.job_id, "after_code_submit")
+        verdict2, detail2 = self._verify_submission(page, form_frame)
+        if verdict2 == "submitted":
+            return SubmitResult(job.job_id, ok=True, status="submitted",
+                                message="Application submitted (verified via emailed code).",
+                                screenshot_path=retry_shot)
+        return SubmitResult(
+            job.job_id, ok=False, status="needs_review",
+            message=f"Entered the emailed code but submission still not confirmed ({detail2}).",
+            screenshot_path=retry_shot)
 
     def _click_submit(self, page):
         contexts = [page]
