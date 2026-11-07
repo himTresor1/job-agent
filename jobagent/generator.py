@@ -397,7 +397,83 @@ class ChatGPTGenerator:
             return json.loads(cleaned)
 
 
+class GroqGenerator:
+    """Groq-backed generator. Same OpenAI-compatible shape as ChatGPTGenerator,
+    just a different endpoint/model."""
+
+    MODEL = "llama-3.3-70b-versatile"
+    URL = "https://api.groq.com/openai/v1/chat/completions"
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or os.environ.get("GROQ_API_KEY")
+        if not self.api_key:
+            raise ValueError("GROQ_API_KEY environment variable not set")
+        self._fallback = TemplateGenerator()
+
+    def generate(self, job: Job, profile: Profile) -> GeneratedDocs:
+        try:
+            questions = []
+            if job.ats in (ATS.GREENHOUSE, ATS.LEVER) and job.apply_url:
+                try:
+                    questions = parse_form_questions(job.apply_url, job.ats)
+                except Exception as e:
+                    log.warning("Failed to parse form questions: %s", e)
+
+            prompt = build_generation_prompt(job, profile, questions)
+            import requests
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": self.MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"}
+            }
+            res = requests.post(self.URL, json=payload, headers=headers, timeout=30)
+            res.raise_for_status()
+            res_json = res.json()
+            text = res_json["choices"][0]["message"]["content"]
+            data = self._parse(text)
+        except Exception as e:
+            log.warning("Groq generation failed for %s; using template: %s", job.job_id, e)
+            return self._fallback.generate(job, profile)
+
+        exp = data.get("experience") or profile.experience
+        resume_html = _RESUME_TMPL.render(
+            p=profile, summary=data.get("summary", profile.summary), experience=exp
+        )
+        cover_html = _COVER_TMPL.render(
+            p=profile, company=job.company,
+            paragraphs=data.get("cover_paragraphs", []),
+        )
+        docs = GeneratedDocs(
+            job_id=job.job_id,
+            resume_html=resume_html,
+            cover_letter_html=cover_html,
+            custom_answers=data.get("custom_answers", []),
+        )
+        ensure_pdf_paths(docs, job.job_id)
+        return docs
+
+    def _prompt(self, job: Job, profile: Profile, questions: list[str]) -> str:
+        return build_generation_prompt(job, profile, questions)
+
+    @staticmethod
+    def _parse(text: str) -> dict:
+        try:
+            return json.loads(text.strip())
+        except Exception:
+            cleaned = re.sub(r"```(?:json)?", "", text).strip()
+            return json.loads(cleaned)
+
+
 def get_generator():
+    if os.environ.get("GROQ_API_KEY"):
+        try:
+            return GroqGenerator()
+        except Exception as e:
+            log.warning("could not init Groq generator (%s); falling back", e)
     if os.environ.get("OPENAI_API_KEY"):
         try:
             return ChatGPTGenerator()
