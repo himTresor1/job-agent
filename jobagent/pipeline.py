@@ -263,11 +263,11 @@ class Pipeline:
     def daily_apply(self) -> dict:
         """Apply until daily_apply_goal is reached (retries LinkedIn errors first)."""
         goal = int(self.config.get("daily_apply_goal", 50))
-        applied = self.db.count_applied()
+        applied = self.db.count_applied_today()
         remaining = max(0, goal - applied)
         if remaining == 0:
-            log.info("daily apply: goal %d already reached (%d applied)", goal, applied)
-            return {"goal": goal, "applied_before": applied, "remaining": 0, "skipped": True}
+            log.info("daily apply: goal %d already reached today (%d applied)", goal, applied)
+            return {"goal": goal, "applied_today_before": applied, "remaining": 0, "skipped": True}
 
         reset = self.db.reset_linkedin_errors()
         with self.db._conn() as c:
@@ -337,11 +337,12 @@ class Pipeline:
                 greenhouse = {"error": proc.stderr[-500:]}
             submitted += greenhouse.get("submitted", 0)
 
-        applied_after = self.db.count_applied()
+        applied_after = self.db.count_applied_today()
         return {
             "goal": goal,
-            "applied_before": applied,
-            "applied_after": applied_after,
+            "applied_today_before": applied,
+            "applied_today_after": applied_after,
+            "applied_all_time": self.db.count_applied(),
             "linkedin": linkedin,
             "greenhouse": greenhouse,
             "reset_errors": reset,

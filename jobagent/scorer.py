@@ -220,8 +220,75 @@ class ChatGPTScorer:
                 return (float(m.group(1)) if m else 50.0), cleaned[:200]
 
 
+class GroqScorer:
+    """Groq-backed scorer. Same OpenAI-compatible chat-completions shape as
+    ChatGPTScorer, just a different endpoint/model — Groq hosts open models
+    (Llama) at very low latency and is used as the default fast/free-tier path."""
+
+    MODEL = "llama-3.3-70b-versatile"
+    URL = "https://api.groq.com/openai/v1/chat/completions"
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or os.environ.get("GROQ_API_KEY")
+        if not self.api_key:
+            raise ValueError("GROQ_API_KEY environment variable not set")
+
+    def score(self, job: Job, profile: Profile) -> tuple[float, str]:
+        import requests
+        prompt = self._build_prompt(job, profile)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": self.MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"}
+        }
+        try:
+            res = requests.post(self.URL, json=payload, headers=headers, timeout=15)
+            res.raise_for_status()
+            res_json = res.json()
+            text = res_json["choices"][0]["message"]["content"]
+            return self._parse(text)
+        except Exception as e:
+            log.warning("Groq scoring failed for %s; falling back: %s", job.job_id, e)
+            return HeuristicScorer().score(job, profile)
+
+    def _build_prompt(self, job: Job, profile: Profile) -> str:
+        desc = job.description[:4000]
+        return (
+            "You are screening a job for a specific candidate. Rate how well it "
+            "fits, 0-100, and give a one-sentence rationale.\n\n"
+            "Respond with a JSON object containing 'score' and 'rationale':\n"
+            '{"score": <number 0-100>, "rationale": "<one sentence>"}\n\n'
+            f"=== CANDIDATE ===\n{profile.to_scoring_blurb()}\n\n"
+            f"=== JOB ===\nTitle: {job.title}\nCompany: {job.company}\n"
+            f"Location: {job.location}\nDescription: {desc}\n"
+        )
+
+    @staticmethod
+    def _parse(text: str) -> tuple[float, str]:
+        try:
+            obj = json.loads(text.strip())
+            return float(obj["score"]), str(obj.get("rationale", ""))[:300]
+        except Exception:
+            cleaned = re.sub(r"```(?:json)?", "", text).strip()
+            try:
+                obj = json.loads(cleaned)
+                return float(obj["score"]), str(obj.get("rationale", ""))[:300]
+            except Exception:
+                m = re.search(r"(\d{1,3})", cleaned)
+                return (float(m.group(1)) if m else 50.0), cleaned[:200]
+
+
 def get_scorer() -> Scorer:
     """Pick the best available scorer without making setup mandatory."""
+    if os.environ.get("GROQ_API_KEY"):
+        try:
+            return GroqScorer()
+        except Exception as e:
+            log.warning("could not init Groq scorer (%s); falling back", e)
     if os.environ.get("OPENAI_API_KEY"):
         try:
             return ChatGPTScorer()

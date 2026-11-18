@@ -231,6 +231,18 @@ class Database:
             row = c.execute("SELECT COUNT(*) n FROM jobs WHERE status = 'applied'").fetchone()
             return int(row["n"]) if row else 0
 
+    def count_applied_today(self) -> int:
+        """Applications marked applied today (UTC) — the daily-goal counter.
+
+        count_applied() is all-time; using it for the daily goal made the goal a
+        lifetime cap: after the first N successes daily-apply would no-op forever."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) n FROM jobs WHERE status = 'applied' "
+                "AND date(last_updated) = date('now')"
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
     def reset_linkedin_errors(self) -> int:
         """Re-queue failed LinkedIn jobs and restore LinkedIn apply URLs."""
         with self._conn() as c:

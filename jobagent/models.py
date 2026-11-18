@@ -48,6 +48,9 @@ class ATS(str, Enum):
     SMARTRECRUITERS = "smartrecruiters"
     WORKDAY = "workday"
     LINKEDIN = "linkedin"
+    WORKABLE = "workable"
+    TEAMTAILOR = "teamtailor"
+    RECRUITEE = "recruitee"
     OTHER = "other"
     UNKNOWN = "unknown"
 
