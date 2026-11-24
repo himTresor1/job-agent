@@ -31,6 +31,7 @@ _ATS_URL_MARKERS = {
     TIER_LEVER: ("lever.co",),
     TIER_PERSONIO: ("personio.com", "personio.de"),
     TIER_SMARTRECRUITERS: ("smartrecruiters.com",),
+    TIER_OTHER_KNOWN: ("workable.com", "teamtailor.com", "recruitee.com"),
 }
 
 
@@ -75,6 +76,8 @@ def predict_ats_tier(job: Job) -> int:
         return TIER_PERSONIO
     if job.ats == ATS.SMARTRECRUITERS:
         return TIER_SMARTRECRUITERS
+    if job.ats in (ATS.WORKABLE, ATS.TEAMTAILOR, ATS.RECRUITEE):
+        return TIER_OTHER_KNOWN
     return TIER_UNKNOWN
 
 

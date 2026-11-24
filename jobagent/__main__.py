@@ -73,12 +73,18 @@ def main(argv=None):
     if config_path.exists():
         try:
             config_data = json.loads(config_path.read_text())
+            if "groq_api_key" in config_data and config_data["groq_api_key"]:
+                os.environ["GROQ_API_KEY"] = config_data["groq_api_key"]
             if "gemini_api_key" in config_data and config_data["gemini_api_key"]:
                 os.environ["GEMINI_API_KEY"] = config_data["gemini_api_key"]
             if "openai_api_key" in config_data and config_data["openai_api_key"]:
                 os.environ["OPENAI_API_KEY"] = config_data["openai_api_key"]
             if "anthropic_api_key" in config_data and config_data["anthropic_api_key"]:
                 os.environ["ANTHROPIC_API_KEY"] = config_data["anthropic_api_key"]
+            if "gmail_address" in config_data and config_data["gmail_address"]:
+                os.environ["GMAIL_ADDRESS"] = config_data["gmail_address"]
+            if "gmail_app_password" in config_data and config_data["gmail_app_password"]:
+                os.environ["GMAIL_APP_PASSWORD"] = config_data["gmail_app_password"]
         except Exception as e:
             sys.stderr.write(f"Warning: failed to load config for API keys: {e}\n")
 
